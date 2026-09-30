@@ -1,0 +1,1159 @@
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  CalendarClock,
+  Coins,
+  FileText,
+  Image as ImageIcon,
+  Lock,
+  Paperclip,
+  ReceiptText,
+  Send,
+  Smile,
+  Sparkles,
+  X,
+} from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { EmojiPicker } from "./EmojiPicker";
+import { TrustBadge, type TrustState } from "@/features/design-system";
+import { cn } from "@/lib/utils";
+import { useFocusTrap } from "@/lib/useFocusTrap";
+import {
+  resolveRecipients,
+  type RecipientResolutionContext,
+} from "@/features/compose/recipientResolver";
+import { usePostageQuote } from "@/features/compose/usePostageQuote";
+import {
+  RecipientPolicyBanner,
+  isPolicyBlocking,
+  isTrustedSender,
+  getMinimumPostage,
+  xlmFromStroops,
+} from "@/features/compose/RecipientPolicyBanner";
+
+import {
+  getRecipientReadiness,
+  parseRecipients,
+  type Attachment,
+  type ComposeMode,
+  type ComposeSubmission,
+  type RecipientReadiness,
+} from "./composeValidation";
+import { DeliveryEstimator, type RelayStatus } from "./DeliveryEstimator";
+import { PostageBalanceBadge } from "./PostageBalanceBadge";
+import { SendPipeline, type StageState } from "@/features/compose/sendPipeline";
+import { SendProgress, type FailureInspectionDetails } from "@/features/compose/SendProgress";
+import { useFreighter } from "@/features/onboarding/useFreighter";
+import { resolveAccountSenderAddress } from "@/services/stellar/account-signer";
+import { useDraftAutosave } from "@/features/compose/useDraftAutosave";
+import { DraftStatusBadge } from "@/features/compose/DraftStatusBadge";
+import { DraftConflictBanner } from "@/features/compose/DraftConflictBanner";
+import type { Draft, DraftAttachmentDescriptor } from "@/lib/api/domain";
+import { restoreDraftIfBlank, readUnsentDraft, saveUnsentDraft } from "@/features/mail/unsent-work";
+import { claimOnce, releaseOnce, classifyAppFailure } from "@/lib/api/failures";
+import { patchEntry } from "@/services/storage/outbox";
+const EMPTY_BLOCKED: string[] = [];
+const EMPTY_RESOLVED: RecipientReadiness[] = [];
+
+export function Compose({
+  open,
+  onClose,
+  onShowToast,
+  initialTo = "",
+  initialSubject = "",
+  initialBody = "",
+  initialDraftId = null,
+  initialVersion = 1,
+  initialPostage = "0.0001",
+  mode = "compose",
+  blockedRecipients = EMPTY_BLOCKED,
+  onSubmit,
+  resolutionContext,
+}: Readonly<{
+  open: boolean;
+  onClose: () => void;
+  onShowToast?: (message: string) => void;
+  initialTo?: string;
+  initialSubject?: string;
+  initialBody?: string;
+  initialDraftId?: string | null;
+  initialVersion?: number;
+  initialPostage?: string;
+  mode?: ComposeMode;
+  blockedRecipients?: string[];
+  onSubmit?: (submission: ComposeSubmission) => void;
+  resolutionContext?: RecipientResolutionContext;
+}>) {
+  const [to, setTo] = useState(initialTo);
+  const [subject, setSubject] = useState(initialSubject);
+  const [body, setBody] = useState(initialBody);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const [sendStages, setSendStages] = useState<StageState[]>([]);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [failureDetails, setFailureDetails] = useState<FailureInspectionDetails | null>(null);
+  const [supportId, setSupportId] = useState<string | undefined>(undefined);
+  const [canRetry, setCanRetry] = useState(true);
+  const [isCommitted, setIsCommitted] = useState(false);
+  const pipelineRef = useRef<SendPipeline | null>(null);
+  const sendLock = useRef(new Set<string>());
+  const [encrypted, setEncrypted] = useState(true);
+  const [receipt, setReceipt] = useState(true);
+  const [postage, setPostage] = useState(initialPostage);
+  const [resolvedRecipients, setResolvedRecipients] = useState<RecipientReadiness[]>([]);
+  const [relayStatus, setRelayStatus] = useState<RelayStatus>("unknown");
+  // Track whether user has manually overridden the postage field
+  const postageManuallySet = useRef(false);
+
+  // Derive the primary recipient (first entry) for policy quote
+  const primaryRecipient = parseRecipients(to)[0] ?? "";
+  const freighter = useFreighter();
+  const senderAddress = freighter.state.status === "connected" ? freighter.state.address : "me";
+  const quoteState = usePostageQuote(primaryRecipient, senderAddress);
+
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+
+  // Stable close handler so the focus trap does not re-arm on every render.
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  const close = useCallback(() => closeRef.current(), []);
+  const composerRef = useFocusTrap(open, close);
+
+  // Move focus to the first field on open, after the trap has mounted.
+  const toFieldRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const t = globalThis.setTimeout(() => toFieldRef.current?.focus(), 0);
+    return () => globalThis.clearTimeout(t);
+  }, [open]);
+
+  const aiSuggestion =
+    "Confirming Friday's review at 10am — let me know if that still works for you.";
+
+  const insertAtCursor = useCallback(
+    (text: string) => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      const newValue = body.slice(0, start) + text + body.slice(end);
+      setBody(newValue);
+
+      // Set cursor position after inserted text
+      setTimeout(() => {
+        textarea.selectionStart = textarea.selectionEnd = start + text.length;
+        textarea.focus();
+      }, 0);
+    },
+    [body],
+  );
+
+  // Hydrate / reset form when opening or closing
+  useEffect(() => {
+    if (open) {
+      const restored = restoreDraftIfBlank(
+        { to: initialTo, subject: initialSubject, body: initialBody },
+        readUnsentDraft(),
+      );
+      setTo(restored.to);
+      setSubject(restored.subject);
+      setBody(restored.body);
+      setSendStages([]);
+      setSendError(null);
+      setFailureDetails(null);
+      setSupportId(undefined);
+      setCanRetry(true);
+      setIsCommitted(false);
+      pipelineRef.current = null;
+      setPostage(restored.restored && restored.postage ? restored.postage : initialPostage);
+      postageManuallySet.current = false;
+    } else {
+      setTo("");
+      setSubject("");
+      setBody("");
+      setAttachments([]);
+      setEmojiOpen(false);
+      setEncrypted(true);
+      setReceipt(true);
+      setSendStages([]);
+      setSendError(null);
+      setFailureDetails(null);
+      setSupportId(undefined);
+      setCanRetry(true);
+      setIsCommitted(false);
+      pipelineRef.current = null;
+      setPostage(initialPostage);
+      setResolvedRecipients(EMPTY_RESOLVED);
+      postageManuallySet.current = false;
+    }
+  }, [open, initialTo, initialSubject, initialBody, initialPostage]);
+
+  const attachmentDescriptors: DraftAttachmentDescriptor[] = attachments.map((att) => {
+    const rawNum = parseInt(att.size.replace(/[^0-9]/g, ""), 10) || 0;
+    const isMb = att.size.toLowerCase().includes("mb");
+    const sizeBytes = isMb ? rawNum * 1024 * 1024 : rawNum * 1024;
+    return {
+      filename: att.name,
+      contentType: att.type === "image" ? "image/png" : "application/octet-stream",
+      sizeBytes,
+    };
+  });
+
+  const handleApplyServerDraft = useCallback((serverDraft: Draft) => {
+    setTo(serverDraft.to.join(", "));
+    setSubject(serverDraft.subject);
+    setBody(serverDraft.body);
+    setAttachments(
+      serverDraft.attachments.map((att) => ({
+        name: att.filename,
+        size: `${Math.round(att.sizeBytes / 1024)} KB`,
+        type: att.contentType.startsWith("image/") ? ("image" as const) : ("file" as const),
+      })),
+    );
+  }, []);
+
+  const draftAutosave = useDraftAutosave({
+    initialDraftId,
+    initialVersion,
+    to,
+    subject,
+    body,
+    attachments: attachmentDescriptors,
+    enabled: open && !isSending,
+    onApplyServerDraft: handleApplyServerDraft,
+  });
+
+  // Fetch relay status when compose opens
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    fetch("/relays/default/diagnostics")
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("Relay check failed"))))
+      .then((data: { status: RelayStatus }) => {
+        if (!cancelled) setRelayStatus(data.status ?? "unknown");
+      })
+      .catch(() => {
+        if (!cancelled) setRelayStatus("unknown");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  // Auto-suggest minimum postage from policy quote when user hasn't manually set it
+  useEffect(() => {
+    if (postageManuallySet.current) return;
+    if (quoteState.status !== "quoted") return;
+    const min = getMinimumPostage(quoteState);
+    if (min === null) return;
+    // Convert stroops to XLM for the postage input
+    if (min === "0") {
+      setPostage("0");
+    } else {
+      const xlm = xlmFromStroops(min);
+      setPostage(xlm);
+    }
+  }, [quoteState]);
+
+  // Resolve recipients when `to` field changes
+  useEffect(() => {
+    const addresses = parseRecipients(to);
+    if (!addresses.length) {
+      if (resolvedRecipients.length > 0) {
+        setResolvedRecipients(EMPTY_RESOLVED);
+      }
+      return;
+    }
+
+    // Show initial "resolving" state immediately
+    setResolvedRecipients(getRecipientReadiness(to, postage, blockedRecipients));
+
+    // AbortController for cancelling in-flight resolution requests
+    const controller = new AbortController();
+
+    // Debounce resolution to avoid excessive API calls
+    const timer = setTimeout(async () => {
+      try {
+        const resolved = await resolveRecipients(
+          addresses,
+          blockedRecipients,
+          resolutionContext,
+          controller.signal,
+        );
+
+        if (controller.signal.aborted) return;
+
+        // Update postage state based on current postage value
+        const postageReady = Number.parseFloat(postage) > 0;
+        const withPostage = resolved.map((r) => ({
+          ...r,
+          postage: postageReady ? ("ready" as const) : ("required" as const),
+        }));
+
+        setResolvedRecipients(withPostage);
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          // Request was intentionally aborted — don't update state
+          return;
+        }
+        console.warn("Recipient resolution failed:", err);
+      }
+    }, 300);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [to, blockedRecipients, postage, resolutionContext, resolvedRecipients.length]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (emojiOpen) {
+          setEmojiOpen(false);
+        } else {
+          close();
+        }
+      }
+      // Tab to insert AI suggestion
+      if (e.key === "Tab" && open && document.activeElement === textareaRef.current) {
+        e.preventDefault();
+        insertAtCursor(aiSuggestion);
+      }
+    };
+    if (open) globalThis.addEventListener("keydown", handler);
+    return () => globalThis.removeEventListener("keydown", handler);
+  }, [open, emojiOpen, insertAtCursor, close]);
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>, type: "file" | "image") => {
+    const files = e.target.files;
+    if (!files) return;
+
+    const newAttachments: Attachment[] = Array.from(files).map((file) => ({
+      name: file.name,
+      size: formatFileSize(file.size),
+      type,
+    }));
+
+    setAttachments([...attachments, ...newAttachments]);
+    e.target.value = ""; // Reset input
+  };
+
+  const removeAttachment = (index: number) => {
+    setAttachments(attachments.filter((_, i) => i !== index));
+  };
+
+  const handleSaveDraft = () => {
+    if (pipelineRef.current) {
+      patchEntry(pipelineRef.current.messageId, {
+        subject: subject.trim(),
+        recipients: parseRecipients(to),
+        sender: senderAddress,
+      });
+    }
+    onShowToast?.("Draft saved");
+    setSendStages([]);
+    setSendError(null);
+    setFailureDetails(null);
+  };
+
+  const handleSend = async (scheduled = false) => {
+    if (isSending || pipelineRef.current?.isRunning()) return;
+
+    const isValid = validateSendRequest({
+      resolvedRecipients,
+      quoteState,
+      postage,
+      subject,
+      body,
+      onShowToast,
+    });
+    if (!isValid) return;
+
+    if (!claimOnce(sendLock.current, "compose-send")) return;
+
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      saveUnsentDraft({ to, subject, body, postage });
+      setSendError("You are offline. The draft is saved on this device.");
+      onShowToast?.("Offline — unsent draft kept");
+      releaseOnce(sendLock.current, "compose-send");
+      return;
+    }
+
+    setIsSending(true);
+
+    // Run the staged send pipeline (immediate send only).
+    setSendError(null);
+    setFailureDetails(null);
+
+    if (!scheduled) {
+      const resolvedAccounts = resolvedRecipients
+        .filter((recipient) => recipient.state === "verified" || recipient.state === "unknown")
+        .map((recipient) => ({
+          address: recipient.address,
+          account: recipient.resolvedAccount ?? recipient.address,
+        }));
+      const resolvedSender = (await resolveAccountSenderAddress()) ?? senderAddress;
+      const pipeline =
+        pipelineRef.current ??
+        new SendPipeline(
+          {
+            sender: resolvedSender,
+            to: to.trim(),
+            subject: subject.trim(),
+            body,
+            recipients: resolvedAccounts.length > 0 ? resolvedAccounts : undefined,
+            postage,
+            postageQuote: quoteState.status === "quoted" ? quoteState.quote : undefined,
+          },
+          setSendStages,
+        );
+      pipelineRef.current = pipeline;
+      setSupportId(pipeline.supportId);
+      setSendStages(pipeline.getStages());
+
+      let outcome: Awaited<ReturnType<SendPipeline["run"]>>;
+      try {
+        outcome = await pipeline.run();
+      } catch (error) {
+        setIsSending(false);
+        saveUnsentDraft({ to, subject, body, postage });
+        setSendError(classifyAppFailure(error).message);
+        onShowToast?.("Send failed — unsent draft kept");
+        releaseOnce(sendLock.current, "compose-send");
+        return;
+      }
+
+      if (!outcome.ok) {
+        setIsSending(false);
+        saveUnsentDraft({ to, subject, body, postage });
+        const failure = classifyAppFailure(new Error(outcome.message), {
+          online: typeof navigator === "undefined" ? true : navigator.onLine,
+        });
+        setCanRetry(outcome.canRetry);
+        setIsCommitted(outcome.isCommitted);
+        setFailureDetails({
+          stage: outcome.stage,
+          code: outcome.code,
+          message: outcome.message,
+          supportId: outcome.supportId,
+          timestamp: outcome.timestamp,
+          canRetry: outcome.canRetry,
+          isCommitted: outcome.isCommitted,
+        });
+
+        if (outcome.reason === "wallet_rejected") {
+          setSendError("Account stamp declined. Your draft is safe; retry when ready.");
+          onShowToast?.("Account stamp declined; draft kept");
+        } else if (outcome.reason === "wallet_unavailable") {
+          setSendError("Your account stamp is unavailable. Sign in, then retry.");
+          onShowToast?.("Account stamp unavailable");
+        } else {
+          setSendError(failure.message);
+          onShowToast?.("Send failed — unsent draft kept");
+        }
+        releaseOnce(sendLock.current, "compose-send");
+        return;
+      }
+
+      pipelineRef.current = null;
+      setSendStages([]);
+      setFailureDetails(null);
+    }
+
+    draftAutosave.cancelAutosave();
+    await draftAutosave.discardDraft();
+
+    onSubmit?.({
+      to: to.trim(),
+      subject: subject.trim(),
+      body,
+      attachments,
+      encrypted,
+      receipt,
+      postage,
+      scheduled,
+      mode: scheduled ? "schedule" : mode,
+    });
+    setIsSending(false);
+    releaseOnce(sendLock.current, "compose-send");
+    onClose();
+    onShowToast?.(getSuccessToastMessage(scheduled, isTrustedSender(quoteState), postage));
+  };
+
+  const handleEmojiSelect = (emoji: string) => {
+    insertAtCursor(emoji);
+  };
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.25 }}
+            onClick={close}
+            aria-hidden="true"
+            className="fixed inset-0 z-40 bg-overlay/40 backdrop-blur-sm"
+          />
+          <motion.div
+            ref={composerRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={getHeaderTitle(mode)}
+            initial={{ opacity: 0, y: 24, scale: 0.96, filter: "blur(8px)" }}
+            animate={{ opacity: 1, y: 0, scale: 1, filter: "blur(0px)" }}
+            exit={{ opacity: 0, y: 24, scale: 0.97, filter: "blur(6px)" }}
+            transition={{ type: "spring", stiffness: 280, damping: 28 }}
+            className="glass-strong fixed bottom-6 right-6 z-50 w-[min(640px,calc(100vw-2rem))] overflow-hidden rounded-2xl"
+          >
+            <div className="flex items-center justify-between border-b border-surface-tint/5 px-4 py-3">
+              <div className="flex items-center gap-3">
+                <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                  {getHeaderTitle(mode)}
+                </div>
+                <DraftStatusBadge
+                  status={draftAutosave.saveStatus}
+                  version={draftAutosave.version}
+                  lastSavedAt={draftAutosave.lastSavedAt}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={close}
+                aria-label="Close compose"
+                className="rounded-lg p-1.5 text-muted-foreground transition hover:bg-surface-tint/6 hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {draftAutosave.conflictDraft && draftAutosave.saveStatus === "conflict" && (
+              <DraftConflictBanner
+                conflictDraft={draftAutosave.conflictDraft}
+                onOverwrite={() => void draftAutosave.resolveConflictOverwrite()}
+                onLoadServer={draftAutosave.resolveConflictLoadServer}
+                onForkNew={() => void draftAutosave.resolveConflictForkNew()}
+              />
+            )}
+            <div className="space-y-0 px-4">
+              <Field
+                innerRef={toFieldRef}
+                id="compose-to"
+                label="To"
+                placeholder="recipients@…"
+                value={to}
+                onChange={setTo}
+              />
+              <RecipientReadinessChips recipients={resolvedRecipients} />
+              <RecipientPolicyBanner quoteState={quoteState} className="mt-1.5" />
+              <DeliveryEstimator
+                recipients={resolvedRecipients}
+                encrypted={encrypted}
+                postage={postage}
+                relayStatus={relayStatus}
+                onAddPostage={() => {
+                  const el = document.querySelector<HTMLInputElement>(
+                    '[aria-label="Postage amount"]',
+                  );
+                  el?.focus();
+                }}
+              />
+              <Field
+                id="compose-subject"
+                label="Subject"
+                placeholder="Subject"
+                value={subject}
+                onChange={setSubject}
+              />
+            </div>
+            <div className="px-4 pb-2">
+              <textarea
+                ref={textareaRef}
+                rows={8}
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                placeholder="Write your message…"
+                aria-label="Message"
+                className="glow-ring w-full resize-none rounded-lg border border-transparent bg-transparent px-1 py-2 text-sm placeholder:text-muted-foreground focus:border-surface-tint/10"
+              />
+
+              {sendStages.length > 0 && (
+                <SendProgress
+                  stages={sendStages}
+                  error={sendError}
+                  failureDetails={failureDetails}
+                  supportId={supportId}
+                  canRetry={canRetry}
+                  isCommitted={isCommitted}
+                  onRetry={() => void handleSend(false)}
+                  onSaveDraft={handleSaveDraft}
+                />
+              )}
+
+              {/* Attachments */}
+              {attachments.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {attachments.map((att, i) => (
+                    <div
+                      key={`${att.name}-${att.size}`}
+                      className="flex items-center gap-2 rounded-lg border border-surface-tint/10 bg-surface-tint/4 px-2 py-1.5"
+                    >
+                      {att.type === "image" ? (
+                        <ImageIcon className="h-3.5 w-3.5 text-muted-foreground" />
+                      ) : (
+                        <FileText className="h-3.5 w-3.5 text-muted-foreground" />
+                      )}
+                      <span className="text-xs text-foreground">{att.name}</span>
+                      <span className="text-[10px] text-muted-foreground">{att.size}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(i)}
+                        aria-label={`Remove attachment ${att.name}`}
+                        className="ml-1 rounded p-0.5 text-muted-foreground transition hover:bg-surface-tint/8 hover:text-foreground"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* AI Suggestion */}
+              <motion.div
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.15 }}
+                className="mt-2 flex items-center gap-2 rounded-lg border border-surface-tint/10 bg-surface-tint/3 px-3 py-2 text-[11px] text-muted-foreground"
+              >
+                <Sparkles className="h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">
+                  AI suggests: &quot;{aiSuggestion}&quot;
+                </span>
+                <button
+                  type="button"
+                  onClick={() => insertAtCursor(aiSuggestion)}
+                  className="shrink-0 rounded-md border border-surface-tint/10 bg-surface-tint/6 px-2 py-0.5 text-[10px] text-foreground/90 transition hover:bg-surface-tint/10"
+                >
+                  Tab to insert
+                </button>
+              </motion.div>
+
+              <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                <ProtocolToggle
+                  active={encrypted}
+                  icon={Lock}
+                  label="Encrypt"
+                  detail="End-to-end"
+                  onClick={() => setEncrypted((value) => !value)}
+                />
+                <ProtocolToggle
+                  active={receipt}
+                  icon={ReceiptText}
+                  label="Read receipt"
+                  detail="On-chain proof"
+                  onClick={() => setReceipt((value) => !value)}
+                />
+                <label className="flex items-center justify-between rounded-lg border border-surface-tint/10 bg-surface-tint/[0.035] px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <Coins className="h-4 w-4 text-muted-foreground" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-[10px] uppercase tracking-wider text-muted-foreground">
+                        Postage
+                      </span>
+                      <span className="flex items-center gap-1 text-xs text-foreground">
+                        <input
+                          value={postage}
+                          onChange={(event) => {
+                            postageManuallySet.current = true;
+                            setPostage(event.target.value);
+                          }}
+                          inputMode="decimal"
+                          className="w-16 rounded-sm bg-transparent font-mono outline-none focus-visible:ring-2 focus-visible:ring-surface-tint/20"
+                          aria-label="Postage amount"
+                        />
+                        XLM
+                        {isTrustedSender(quoteState) && (
+                          <span className="ml-1 text-[9px] text-status-success dark:text-emerald-400 font-medium uppercase tracking-wide">
+                            free
+                          </span>
+                        )}
+                      </span>
+                    </span>
+                  </div>
+                  <PostageBalanceBadge />
+                </label>
+              </div>
+            </div>
+            <div className="flex items-center gap-1 border-t border-surface-tint/5 px-3 py-2.5">
+              {/* Hidden file inputs */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                onChange={(e) => handleFileSelect(e, "file")}
+                className="hidden"
+              />
+              <input
+                ref={imageInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={(e) => handleFileSelect(e, "image")}
+                className="hidden"
+              />
+
+              {/* Attachment button */}
+              <motion.button
+                whileTap={{ scale: 0.9 }}
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="Attach files"
+                className="rounded-lg p-2 text-muted-foreground transition hover:bg-surface-tint/6 hover:text-foreground"
+              >
+                <Paperclip className="h-4 w-4" />
+              </motion.button>
+
+              {/* Image button */}
+              <motion.button
+                whileTap={{ scale: 0.9 }}
+                onClick={() => imageInputRef.current?.click()}
+                aria-label="Attach image"
+                className="rounded-lg p-2 text-muted-foreground transition hover:bg-surface-tint/6 hover:text-foreground"
+              >
+                <ImageIcon className="h-4 w-4" />
+              </motion.button>
+
+              {/* Emoji button */}
+              <div className="relative">
+                <motion.button
+                  whileTap={{ scale: 0.9 }}
+                  onClick={() => setEmojiOpen(!emojiOpen)}
+                  aria-label="Insert emoji"
+                  aria-expanded={emojiOpen}
+                  aria-haspopup="dialog"
+                  className={cn(
+                    "rounded-lg p-2 text-muted-foreground transition hover:bg-surface-tint/6 hover:text-foreground",
+                    emojiOpen && "bg-surface-tint/6 text-foreground",
+                  )}
+                >
+                  <Smile className="h-4 w-4" />
+                </motion.button>
+                <EmojiPicker
+                  open={emojiOpen}
+                  onClose={() => setEmojiOpen(false)}
+                  onSelect={handleEmojiSelect}
+                />
+              </div>
+
+              {/* Send button */}
+              <motion.button
+                whileTap={{ scale: 0.97 }}
+                onClick={() => handleSend(true)}
+                disabled={
+                  isSending ||
+                  isPolicyBlocking(quoteState) ||
+                  resolvedRecipients.length === 0 ||
+                  resolvedRecipients.some(
+                    (recipient) =>
+                      recipient.state === "blocked" ||
+                      recipient.state === "invalid" ||
+                      recipient.state === "resolving" ||
+                      Boolean(recipient.expiresAt && new Date() > new Date(recipient.expiresAt)) ||
+                      recipient.keyStatus === "revoked" ||
+                      recipient.keyStatus === "retired",
+                  ) ||
+                  Boolean(
+                    quoteState.status === "quoted" &&
+                    quoteState.quote.expiresAt &&
+                    new Date() > new Date(quoteState.quote.expiresAt),
+                  )
+                }
+                className="ml-auto inline-flex items-center gap-2 rounded-lg border border-surface-tint/10 px-3 py-1.5 text-xs text-muted-foreground transition hover:bg-surface-tint/6 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <CalendarClock className="h-3.5 w-3.5" />
+                Schedule
+              </motion.button>
+              {(() => {
+                const policyBlocked = isPolicyBlocking(quoteState);
+                const recipientBlocked = resolvedRecipients.some(
+                  (r) =>
+                    r.state === "blocked" ||
+                    r.state === "invalid" ||
+                    r.keyStatus === "revoked" ||
+                    r.keyStatus === "retired",
+                );
+                const recipientResolving = resolvedRecipients.some((r) => r.state === "resolving");
+                const isBlocked = policyBlocked || recipientBlocked;
+                const trusted = isTrustedSender(quoteState);
+                const isStale: boolean =
+                  resolvedRecipients.some(
+                    (r) => r.expiresAt && new Date() > new Date(r.expiresAt),
+                  ) ||
+                  Boolean(
+                    quoteState.status === "quoted" &&
+                    quoteState.quote.expiresAt &&
+                    new Date() > new Date(quoteState.quote.expiresAt),
+                  );
+
+                // Determine send CTA disabled state
+                const isSendDisabled = isSending || isBlocked || recipientResolving || isStale;
+
+                // Determine button label and style
+                let sendLabel: string;
+                let sendButtonClass: string;
+                if (isSending) {
+                  sendLabel = "Sending...";
+                  sendButtonClass =
+                    "inline-flex items-center gap-2 rounded-lg border border-surface-tint/10 bg-surface-tint/[0.08] px-3 py-1.5 text-xs font-medium text-foreground opacity-50 cursor-not-allowed";
+                } else if (isBlocked) {
+                  sendLabel = "Blocked";
+                  sendButtonClass =
+                    "inline-flex items-center gap-2 rounded-lg border border-red-300/20 bg-red-300/[0.08] px-3 py-1.5 text-xs font-medium text-status-danger dark:text-red-200 opacity-70 cursor-not-allowed";
+                } else if (isStale) {
+                  sendLabel = "Stale";
+                  sendButtonClass =
+                    "inline-flex items-center gap-2 rounded-lg border border-yellow-300/20 bg-yellow-300/[0.08] px-3 py-1.5 text-xs font-medium text-status-warning dark:text-yellow-200 opacity-70 cursor-not-allowed";
+                } else if (trusted) {
+                  sendLabel = "Send free";
+                  sendButtonClass =
+                    "inline-flex items-center gap-2 rounded-lg border border-emerald-300/20 bg-emerald-300/[0.08] px-3 py-1.5 text-xs font-medium text-status-success dark:text-emerald-100 transition hover:bg-emerald-300/[0.14]";
+                } else if (quoteState.status === "quoted" && Number(postage) > 0) {
+                  sendLabel = `Send + ${postage} XLM`;
+                  sendButtonClass =
+                    "inline-flex items-center gap-2 rounded-lg border border-surface-tint/10 bg-surface-tint/[0.08] px-3 py-1.5 text-xs font-medium text-foreground transition hover:bg-surface-tint/[0.14]";
+                } else {
+                  sendLabel = "Send";
+                  sendButtonClass =
+                    "inline-flex items-center gap-2 rounded-lg border border-surface-tint/10 bg-surface-tint/[0.08] px-3 py-1.5 text-xs font-medium text-foreground transition hover:bg-surface-tint/[0.14]";
+                }
+
+                const disabledReason = getDisabledReason(isBlocked, recipientResolving, isStale);
+
+                return (
+                  <motion.button
+                    whileHover={isSendDisabled ? undefined : { y: -1 }}
+                    whileTap={isSendDisabled ? undefined : { scale: 0.97 }}
+                    onClick={() => void handleSend(false)}
+                    disabled={isSendDisabled}
+                    aria-disabled={isSendDisabled}
+                    aria-busy={isSending}
+                    title={disabledReason}
+                    aria-label={disabledReason ?? sendLabel}
+                    className={sendButtonClass}
+                    style={
+                      isSendDisabled ? undefined : { boxShadow: "0 8px 30px -10px rgba(0,0,0,0.6)" }
+                    }
+                  >
+                    <Send className={cn("h-3.5 w-3.5", isSending && "motion-safe:animate-pulse")} />
+                    {sendLabel}
+                  </motion.button>
+                );
+              })()}
+            </div>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
+  );
+}
+
+function recipientTrustState(state: RecipientReadiness["state"]): TrustState {
+  if (state === "blocked") return "blocked";
+  if (state === "verified") return "verified";
+  if (state === "unknown") return "unknown";
+  if (state === "invalid") return "blocked"; // invalid is treated like blocked visually
+  return "unknown"; // resolving
+}
+
+function getRecipientChipColor(state: RecipientReadiness["state"]) {
+  switch (state) {
+    case "verified":
+      return "border-emerald-300/25 bg-emerald-300/10 text-status-success dark:text-emerald-100";
+    case "blocked":
+      return "border-red-300/25 bg-red-300/10 text-status-danger dark:text-red-100";
+    case "invalid":
+      return "border-red-300/25 bg-red-300/10 text-status-danger dark:text-red-100";
+    case "unknown":
+      return "border-amber-300/25 bg-amber-300/10 text-status-warning dark:text-amber-100";
+    case "resolving":
+      return "border-blue-300/25 bg-blue-300/10 text-status-info dark:text-blue-100 motion-safe:animate-pulse";
+    default:
+      return "border-border/25 dark:border-zinc-300/25 bg-secondary/10 dark:bg-zinc-300/10 text-status-neutral dark:text-zinc-100";
+  }
+}
+
+function RecipientReadinessChips({ recipients }: Readonly<{ recipients: RecipientReadiness[] }>) {
+  if (!recipients.length) return null;
+
+  return (
+    <div className="flex flex-wrap gap-1.5 border-b border-surface-tint/5 py-2 pl-19">
+      {recipients.map((recipient) => (
+        <div
+          key={recipient.address}
+          title={recipient.message}
+          className={cn(
+            "rounded-full border px-3 py-1.5 text-[10px] flex items-center gap-2",
+            getRecipientChipColor(recipient.state),
+          )}
+        >
+          <TrustBadge
+            state={recipientTrustState(recipient.state)}
+            showLabel={false}
+            size="sm"
+            className="shrink-0"
+          />
+          <span className="truncate">{recipient.address}</span>
+
+          {/* Show account details if resolved */}
+          {recipient.resolvedAccount && (
+            <span className="shrink-0 text-[9px] opacity-75">
+              → {recipient.resolvedAccount.slice(0, 8)}…
+            </span>
+          )}
+
+          {/* Cache provenance badge */}
+          {recipient.provenance && recipient.cached && (
+            <span className="shrink-0 rounded-sm bg-surface-tint/8 px-1 py-0.5 text-[8px] uppercase tracking-wider opacity-60">
+              cached
+            </span>
+          )}
+          {recipient.provenance === "stellar_federation" && (
+            <span className="shrink-0 rounded-sm bg-blue-400/15 px-1 py-0.5 text-[8px] uppercase tracking-wider text-status-info dark:text-blue-300">
+              federation
+            </span>
+          )}
+
+          {/* Key status indicators */}
+          {recipient.keyStatus === "active" && (
+            <span
+              className="shrink-0 inline-block w-2 h-2 rounded-full bg-emerald-400 opacity-70"
+              title="Encryption key active"
+            />
+          )}
+          {recipient.keyStatus === "revoked" && (
+            <span
+              className="shrink-0 rounded-sm bg-red-400/15 px-1 py-0.5 text-[8px] uppercase tracking-wider text-status-danger dark:text-red-300"
+              title="Key revoked"
+            >
+              key revoked
+            </span>
+          )}
+          {recipient.keyStatus === "retired" && (
+            <span
+              className="shrink-0 rounded-sm bg-amber-400/15 px-1 py-0.5 text-[8px] uppercase tracking-wider text-status-warning dark:text-amber-300"
+              title="Key retired"
+            >
+              key retired
+            </span>
+          )}
+          {recipient.keyStatus === "unavailable" && (
+            <span
+              className="shrink-0 rounded-sm bg-secondary/15 dark:bg-zinc-400/15 px-1 py-0.5 text-[8px] uppercase tracking-wider text-muted-foreground dark:text-zinc-400"
+              title="Key directory unavailable"
+            >
+              key pending
+            </span>
+          )}
+
+          {/* Fallback: show encryption key dot for legacy (no keyStatus) */}
+          {!recipient.keyStatus && recipient.encryptionKey && (
+            <span className="shrink-0 inline-block w-2 h-2 rounded-full bg-current opacity-50" />
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ProtocolToggle({
+  active,
+  icon: Icon,
+  label,
+  detail,
+  onClick,
+}: Readonly<{
+  active: boolean;
+  icon: typeof Lock;
+  label: string;
+  detail: string;
+  onClick: () => void;
+}>) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        "flex items-center gap-2 rounded-lg border px-3 py-2 text-left transition",
+        active
+          ? "border-emerald-200/20 bg-emerald-200/6"
+          : "border-surface-tint/10 bg-surface-tint/2.5 opacity-60",
+      )}
+    >
+      <Icon
+        className={cn(
+          "h-4 w-4",
+          active ? "text-status-success dark:text-emerald-200" : "text-muted-foreground",
+        )}
+      />
+      <span>
+        <span className="block text-xs font-medium text-foreground">{label}</span>
+        <span className="block text-[10px] text-muted-foreground">{detail}</span>
+      </span>
+    </button>
+  );
+}
+
+function Field({
+  id,
+  label,
+  placeholder,
+  value,
+  onChange,
+  innerRef,
+}: Readonly<{
+  id: string;
+  label: string;
+  placeholder: string;
+  value: string;
+  onChange: (v: string) => void;
+  innerRef?: React.Ref<HTMLInputElement>;
+}>) {
+  return (
+    <div className="flex items-center gap-3 border-b border-surface-tint/5 py-2">
+      <label
+        htmlFor={id}
+        className="w-16 shrink-0 text-[11px] uppercase tracking-[0.18em] text-muted-foreground"
+      >
+        {label}
+      </label>
+      <input
+        id={id}
+        ref={innerRef}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="glow-ring w-full rounded-sm bg-transparent text-sm text-foreground placeholder:text-muted-foreground/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-surface-tint/20"
+      />
+    </div>
+  );
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return Number.parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+}
+
+function validateSendRequest({
+  resolvedRecipients,
+  quoteState,
+  postage,
+  subject,
+  body,
+  onShowToast,
+}: {
+  resolvedRecipients: RecipientReadiness[];
+  quoteState: ReturnType<typeof usePostageQuote>;
+  postage: string;
+  subject: string;
+  body: string;
+  onShowToast?: (message: string) => void;
+}) {
+  if (resolvedRecipients.length === 0) {
+    onShowToast?.("Please add at least one recipient");
+    return false;
+  }
+
+  // Check for stale resolution
+  const now = new Date();
+  if (
+    resolvedRecipients.some(
+      (recipient) => recipient.expiresAt && now > new Date(recipient.expiresAt),
+    )
+  ) {
+    onShowToast?.("Recipient resolution is stale — re-resolving…");
+    return false;
+  }
+
+  // Check if policy quote is expired
+  if (
+    quoteState.status === "quoted" &&
+    quoteState.quote.expiresAt &&
+    now > new Date(quoteState.quote.expiresAt)
+  ) {
+    onShowToast?.("Policy quote is expired — re-quoting…");
+    return false;
+  }
+
+  // Check for key status
+  if (
+    resolvedRecipients.some(
+      (recipient) =>
+        recipient.state === "verified" &&
+        (recipient.keyStatus === "revoked" || recipient.keyStatus === "retired"),
+    )
+  ) {
+    onShowToast?.("Recipient encryption key has been revoked");
+    return false;
+  }
+
+  if (resolvedRecipients.some((r) => r.state === "resolving" || r.state === "invalid")) {
+    onShowToast?.("All recipients must be verified before sending");
+    return false;
+  }
+  if (resolvedRecipients.some((r) => r.state === "blocked")) {
+    onShowToast?.("Remove blocked recipients before sending");
+    return false;
+  }
+  if (isPolicyBlocking(quoteState)) {
+    onShowToast?.("Recipient has blocked this sender");
+    return false;
+  }
+  if (!isTrustedSender(quoteState)) {
+    const currentQuote = quoteState.status === "quoted" ? quoteState.quote : null;
+    if (currentQuote && currentQuote.amount !== "0") {
+      const postageStroops = BigInt(Math.round(Number(postage) * 10_000_000));
+      const minimumStroops = BigInt(currentQuote.amount);
+      if (postageStroops < minimumStroops) {
+        onShowToast?.("Add postage before sending");
+        return false;
+      }
+    }
+  }
+  if (!subject.trim()) {
+    onShowToast?.("Please enter a subject");
+    return false;
+  }
+  if (!body.trim()) {
+    onShowToast?.("Please enter a message");
+    return false;
+  }
+  return true;
+}
+
+function getHeaderTitle(mode: string) {
+  if (mode === "compose") return "New message";
+  if (mode === "schedule") return "Schedule send";
+  return mode.replace("-", " ");
+}
+
+function getDisabledReason(isBlocked: boolean, recipientResolving: boolean, isStale: boolean) {
+  if (isBlocked) return "Recipient has blocked this sender or key is revoked";
+  if (recipientResolving) return "Waiting for recipient verification";
+  if (isStale) return "Recipient resolution or policy quote is stale";
+  return undefined;
+}
+
+function getSuccessToastMessage(scheduled: boolean, trusted: boolean, postage: string) {
+  if (scheduled) return "Message scheduled with postage reserved";
+  if (trusted) return "Encrypted message sent (trusted — no postage required)";
+  return `Encrypted message sent with ${postage} XLM postage`;
+}
