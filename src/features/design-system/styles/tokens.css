@@ -1,0 +1,176 @@
+:root {
+  color-scheme: dark;
+  --radius: 0.875rem;
+  --background: oklch(0.18 0.005 270);
+  --foreground: oklch(0.96 0.005 270);
+  --card: oklch(0.22 0.006 270);
+  --card-foreground: oklch(0.96 0.005 270);
+  --popover: oklch(0.22 0.006 270);
+  --popover-foreground: oklch(0.96 0.005 270);
+  --primary: oklch(0.95 0.005 270);
+  --primary-foreground: oklch(0.18 0.005 270);
+  --secondary: oklch(0.27 0.006 270);
+  --secondary-foreground: oklch(0.96 0.005 270);
+  --muted: oklch(0.25 0.006 270);
+  --muted-foreground: oklch(0.7 0.01 270);
+  --accent: oklch(0.32 0.008 270);
+  --accent-foreground: oklch(0.98 0.005 270);
+  --destructive: oklch(0.62 0.2 25);
+  --destructive-foreground: oklch(0.98 0.005 270);
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.7 0.01 270 / 50%);
+  --silver: oklch(0.85 0.005 270);
+  --glass: oklch(0.22 0.006 270 / 0.32);
+  --glass-strong: oklch(0.18 0.005 270 / 0.55);
+  --gradient-ambient:
+    radial-gradient(1200px 600px at 10% -10%, oklch(0.45 0.02 270 / 0.35), transparent 60%),
+    radial-gradient(900px 500px at 90% 10%, oklch(0.4 0.015 240 / 0.3), transparent 60%),
+    radial-gradient(700px 500px at 50% 110%, oklch(0.35 0.015 280 / 0.35), transparent 60%);
+  --gradient-glass: linear-gradient(135deg, oklch(1 0 0 / 0.06), oklch(1 0 0 / 0.02));
+  --gradient-silver: linear-gradient(135deg, oklch(0.95 0.005 270), oklch(0.7 0.005 270));
+  --shadow-elegant: 0 10px 40px -10px oklch(0 0 0 / 0.6), 0 1px 0 0 oklch(1 0 0 / 0.05) inset;
+  --shadow-glow: 0 0 0 1px oklch(1 0 0 / 0.08), 0 8px 30px -8px oklch(0 0 0 / 0.5);
+  --surface-tint: #fff;
+  --surface-recessed: #000;
+  --overlay: #000;
+  --surface-panel: oklch(0.15 0.005 270);
+  --preview-background: oklch(0.3 0.006 270 / 0.42);
+  --preview-active: oklch(0.3 0.006 270 / 0.56);
+  --preview-hover: oklch(0.34 0.006 270 / 0.48);
+  --status-success: #6ee7b7;
+  --status-warning: #fcd34d;
+  --status-danger: #f87171;
+  --status-info: #7dd3fc;
+  --status-special: #c4b5fd;
+  --status-neutral: #d4d4d8;
+  --icon-foreground: var(--muted-foreground);
+  --gradient-avatar: linear-gradient(135deg, #4d5560, #232326);
+  --gradient-account: linear-gradient(135deg, #7a8290, #2b2b31);
+  --ambient-orb-one: radial-gradient(closest-side, oklch(0.6 0.02 270 / 0.5), transparent);
+  --ambient-orb-two: radial-gradient(closest-side, oklch(0.55 0.02 240 / 0.45), transparent);
+  --ambient-orb-three: radial-gradient(closest-side, oklch(0.7 0.01 280 / 0.4), transparent);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  /* Equal sRGB mix of #FDEB9E and #FDFBCF, rounded to #FDF3B7. */
+  --background: #fdf3b7;
+  --foreground: #49311d;
+  --card: #fff6cd;
+  --card-foreground: var(--foreground);
+  --popover: #fff8d9;
+  --popover-foreground: var(--foreground);
+  --primary: #694322;
+  --primary-foreground: #fff8d9;
+  --secondary: #f5e5a8;
+  --secondary-foreground: var(--foreground);
+  --muted: #f7e9b2;
+  --muted-foreground: #745834;
+  --accent: #f4df9d;
+  --accent-foreground: var(--foreground);
+  --destructive: #9d3a29;
+  --destructive-foreground: #fff8d9;
+  --border: #dcc381;
+  --input: #c9a764;
+  --ring: #96652f;
+  --silver: #76522e;
+  --icon-foreground: #855e31;
+  --surface-tint: #825a29;
+  --surface-recessed: #ecd38e;
+  --surface-panel: #fff6cd;
+  --preview-background: #fff6cd;
+  --preview-active: #f5dfa0;
+  --preview-hover: #fbecc0;
+  --surface-highlight: #fffbe6;
+  --surface-glow: #f9da7c;
+  --surface-depth: #e8bf6b;
+  --overlay: var(--surface-depth);
+  --glass-edge: rgb(255 251 230 / 78%);
+  --glass: rgb(255 246 205 / 54%);
+  --glass-strong: rgb(255 248 217 / 76%);
+  --status-success: #42602a;
+  --status-warning: #845119;
+  --status-danger: #9d3a29;
+  --status-info: #295e62;
+  --status-special: #79516b;
+  --status-neutral: #6f512e;
+  --gradient-ambient:
+    radial-gradient(900px 600px at 4% 0%, rgb(249 218 124 / 46%), transparent 64%),
+    radial-gradient(800px 650px at 92% 8%, rgb(255 251 230 / 78%), transparent 62%),
+    radial-gradient(850px 550px at 68% 112%, rgb(232 191 107 / 24%), transparent 66%);
+  --gradient-glass: linear-gradient(
+    135deg,
+    rgb(255 251 230 / 55%),
+    rgb(255 251 230 / 8%) 42%,
+    rgb(249 218 124 / 12%) 72%,
+    rgb(255 251 230 / 28%)
+  );
+  --gradient-silver: linear-gradient(135deg, #5b391d, #815323);
+  --gradient-avatar: linear-gradient(135deg, #936639, #654023);
+  --gradient-account: linear-gradient(135deg, #c99d56, #79522f);
+  --ambient-orb-one: radial-gradient(closest-side, rgb(238 179 65 / 64%), transparent);
+  --ambient-orb-two: radial-gradient(closest-side, rgb(245 201 102 / 62%), transparent);
+  --ambient-orb-three: radial-gradient(closest-side, rgb(255 251 230 / 92%), transparent);
+  --shadow-elegant:
+    0 16px 38px -22px rgb(117 75 24 / 24%), 0 3px 8px -5px rgb(117 75 24 / 16%),
+    inset 0 1px 0 var(--glass-edge), inset 0 -1px 0 rgb(159 114 46 / 8%);
+  --shadow-glow:
+    0 0 0 1px rgb(159 114 46 / 22%), 0 12px 28px -16px rgb(139 91 28 / 24%),
+    inset 0 1px 0 var(--glass-edge);
+}
+
+:root[data-density="compact"] {
+  --mail-list-gap: 0.25rem;
+  --mail-list-padding: 0.4rem;
+}
+
+:root[data-density="comfortable"] {
+  --mail-list-gap: 0.5rem;
+  --mail-list-padding: 0.625rem;
+}
+
+:root[data-glass="subtle"] {
+  --glass: oklch(0.22 0.006 270 / 0.22);
+  --glass-strong: oklch(0.18 0.005 270 / 0.42);
+  --gradient-glass: linear-gradient(135deg, oklch(1 0 0 / 0.035), oklch(1 0 0 / 0.012));
+}
+
+:root[data-glass="strong"] {
+  --glass: oklch(0.22 0.006 270 / 0.46);
+  --glass-strong: oklch(0.18 0.005 270 / 0.72);
+  --gradient-glass: linear-gradient(135deg, oklch(1 0 0 / 0.09), oklch(1 0 0 / 0.035));
+}
+
+:root[data-theme="light"][data-glass="subtle"] {
+  --glass: rgb(255 246 205 / 38%);
+  --glass-strong: rgb(255 248 217 / 64%);
+  --gradient-glass: linear-gradient(
+    135deg,
+    rgb(255 251 230 / 36%),
+    transparent 48%,
+    rgb(249 218 124 / 8%)
+  );
+}
+
+:root[data-theme="light"][data-glass="strong"] {
+  --glass: rgb(255 246 205 / 68%);
+  --glass-strong: rgb(255 248 217 / 84%);
+  --gradient-glass: linear-gradient(
+    135deg,
+    rgb(255 251 230 / 70%),
+    rgb(255 251 230 / 12%) 42%,
+    rgb(249 218 124 / 18%)
+  );
+}
+
+:root[data-reader="serif"] .mail-reader-atmosphere article,
+:root[data-reader="serif"] .mail-reader-atmosphere .reader-copy {
+  font-family: Georgia, "Times New Roman", serif;
+}
+
+:root[data-reader="large"] .mail-reader-atmosphere article,
+:root[data-reader="large"] .mail-reader-atmosphere .reader-copy {
+  font-size: 1.0625rem;
+  line-height: 1.8;
+}
